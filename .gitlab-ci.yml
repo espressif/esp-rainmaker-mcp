@@ -1,0 +1,54 @@
+stages:
+  - test
+
+variables:
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+
+cache:
+  paths:
+    - .cache/pip
+
+test:python3.10:
+  stage: test
+  image: python:3.10
+  before_script:
+    - pip install uv
+    - uv sync
+  script:
+    - echo "Comprehensive testing with Python 3.10"
+    - uv run python --version
+    - uv run python test_mcp_server.py
+    - echo "Python 3.10 comprehensive tests completed"
+
+test:python3.11:
+  stage: test
+  image: python:3.11
+  before_script:
+    - pip install uv
+    - uv sync
+  script:
+    - echo "Comprehensive testing with Python 3.11"
+    - uv run python --version
+    - uv run python test_mcp_server.py
+
+test:python3.12:
+  stage: test
+  image: python:3.12
+  before_script:
+    - pip install uv
+    - uv sync
+  script:
+    - echo "Comprehensive testing with Python 3.12"
+    - uv run python --version
+    - uv run python test_mcp_server.py
+
+test:python3.13:
+  stage: test
+  image: python:3.13
+  before_script:
+    - pip install uv
+    - uv sync
+  script:
+    - echo "Comprehensive testing with Python 3.13"
+    - uv run python --version
+    - uv run python test_mcp_server.py
