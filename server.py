@@ -294,47 +294,154 @@ async def set_params(ctx: Context, node_id: str, params_dict: dict) -> str:
 
 
 @mcp.tool()
-async def get_node_details(ctx: Context, node_id: str | None = None) -> dict | str:
+async def get_node_details(
+    ctx: Context,
+    node_id: str | None = None,
+    fields: str | None = None,
+    name: str | None = None,
+    type_: str | None = None
+) -> dict | list | str:
     """
     **PREFERRED TOOL** for getting comprehensive node information efficiently.
     Gets config, status, and params in a single API call instead of multiple separate calls.
 
-    Use this tool when:
-    - User asks for "all devices", "all nodes", or general device information
-    - User wants comprehensive information about devices
-    - You need both config AND status AND params for devices
+    USAGE:
+    - To get all nodes: set `node_id=None` (default).
+    - To get a single node: set `node_id` to a single node ID string.
+      - Only a single node ID is supported. Do NOT use a comma-separated list or array.
+      - If the node is not found or not accessible, the result will be an empty dict or contain empty/unknown fields.
 
-    If node_id is provided, gets details for that specific node.
-    If node_id is None, gets details for all nodes (recommended for overview requests).
+    FILTERING & FIELD SELECTION:
+    - `fields`: comma-separated list of fields to include in the output (e.g. "node_id,name,type,config,params,status.connectivity,fw_version,mapping_timestamp").
+    - `name`: substring match (matches user-visible name, extracted from params.{DeviceType}.Name).
+    - `type_`: substring match (matches device type, from config.devices[].type).
+    - `node_id`: single node ID string (for a single node), or None (for all nodes).
 
-    ESP RainMaker Naming System:
-    - Node name: config.info.name (usually generic like "ESP RainMaker Device")
-    - Device type: config.devices[].name (like "Light", "Switch", "AC")
-    - Display name: params.{DeviceType}.Name (user-defined like "Living Room Light")
+    MULTIPLE NODE FILTERING:
+    - To filter for multiple node IDs, set `node_id=None` and use filtering (e.g. by name or type) in post-processing.
+    - Passing a comma-separated list of node IDs is NOT supported and will result in an error.
+
+    RETURN VALUE:
+    - If a single node is requested, returns a dict (or empty dict if not found).
+    - If all nodes are requested, returns a list of dicts (one per node).
+
+    EXAMPLES:
+    - Get all nodes, only node_id and name:
+        get_node_details(ctx, fields="node_id,name")
+    - Get a single node by ID:
+        get_node_details(ctx, node_id="30EDA0E0AF48", fields="node_id,name,config")
+    - Get all nodes of type 'lightbulb':
+        get_node_details(ctx, type_="lightbulb", fields="node_id,name,type")
     """
-    if node_id:
-        log.info(f"Fetching detailed information for node: {node_id}")
-    else:
-        log.info("Fetching detailed information for all nodes")
-
+    import copy
+    log.info(f"Fetching detailed information for node: {node_id}")
     try:
         s = await ensure_login_session()
 
+        # Fetch node(s) - always extract node_details array
         if node_id:
-            # Get details for specific node
+            if isinstance(node_id, (list, tuple, set)) or (isinstance(node_id, str) and ',' in node_id):
+                return {"error": "Only a single node_id is allowed. For multiple nodes, use node_id=None and filter in post-processing."}
             details_data = await asyncio.to_thread(s.get_node_details_by_id, node_id)
         else:
-            # Get details for all nodes
             details_data = await asyncio.to_thread(s.get_node_details)
 
-        if node_id:
-            log.info(f"Successfully fetched detailed information for node: {node_id}")
+        if isinstance(details_data, dict) and 'node_details' in details_data:
+            nodes = details_data['node_details']
         else:
-            log.info("Successfully fetched detailed information for all nodes")
+            nodes = details_data if isinstance(details_data, list) else []
 
-        return details_data
+        # Parse fields
+        if fields:
+            field_list = [f.strip() for f in fields.split(',') if f.strip()]
+        else:
+            field_list = None  # None means return all fields
 
-    except (ValueError, ConnectionError, RuntimeError) as e:  # From ensure_login_session
+        # Helper: extract display name and type (from get_group_details)
+        def get_device_info(node: dict) -> tuple[str, str]:
+            try:
+                devices = node.get("config", {}).get("devices", [])
+                params = node.get("params", {})
+                if devices and isinstance(devices, list):
+                    device = devices[0]
+                    device_name = device.get("name", "")  # e.g., "Light"
+                    device_type = device.get("type", "Unknown")
+                    user_visible_name = None
+                    if device_name and device_name in params:
+                        user_visible_name = params[device_name].get("Name")
+                    if not user_visible_name:
+                        user_visible_name = device_name or "Unnamed Device"
+                    return user_visible_name, device_type
+            except Exception as e:
+                log.warning(f"Error extracting device info: {e}")
+            return "Unknown Device", "Unknown"
+
+        # Filtering logic
+        filtered_nodes = []
+        for node in nodes:
+            # Filter by node_id (if node_id is a list, support that)
+            if node_id and isinstance(node_id, (list, tuple, set)):
+                if node.get("node_id") not in node_id:
+                    continue
+            # Filter by name (substring, from params)
+            if name:
+                display_name, _ = get_device_info(node)
+                if name.lower() not in display_name.lower():
+                    continue
+            # Filter by type (substring, from device type)
+            if type_:
+                _, device_type = get_device_info(node)
+                if type_.lower() not in device_type.lower():
+                    continue
+            # If fields specified, select only those fields
+            if field_list:
+                filtered = {}
+                for field in field_list:
+                    if field == "node_id":
+                        filtered["node_id"] = node.get("node_id", "")
+                    elif field == "name":
+                        filtered["name"] = get_device_info(node)[0]
+                    elif field == "type":
+                        filtered["type"] = get_device_info(node)[1]
+                    elif field == "config":
+                        filtered["config"] = node.get("config", {})
+                    elif field == "params":
+                        filtered["params"] = node.get("params", {})
+                    elif field == "status":
+                        filtered["status"] = node.get("status", {})
+                    elif field == "status.connectivity":
+                        filtered.setdefault("status", {})["connectivity"] = node.get("status", {}).get("connectivity", {})
+                    elif field == "config.info":
+                        value = node.get("config", {}).get("info")
+                        filtered[field] = value if value is not None else None
+                    elif field.startswith("config.info."):
+                        # e.g. config.info.name
+                        parts = field.split('.')
+                        value = node.get("config", {}).get("info", {})
+                        for p in parts[2:]:
+                            value = value.get(p, {}) if isinstance(value, dict) else {}
+                        filtered[field] = value
+                    elif field.startswith("params."):
+                        # e.g. params.Light.Name
+                        parts = field.split('.')
+                        value = node.get("params", {})
+                        for p in parts[1:]:
+                            value = value.get(p, {}) if isinstance(value, dict) else {}
+                        filtered[field] = value
+                    else:
+                        # fallback: top-level
+                        filtered[field] = node.get(field, None)
+                filtered_nodes.append(filtered)
+            else:
+                # No field filtering, return full node
+                filtered_nodes.append(copy.deepcopy(node))
+
+        # Return single node as dict, all as list
+        if node_id and not isinstance(node_id, (list, tuple, set)):
+            return filtered_nodes[0] if filtered_nodes else {}
+        return filtered_nodes
+
+    except (ValueError, ConnectionError, RuntimeError) as e:
         return str(e)
     except HttpErrorResponse as e:
         log.error(f"HTTP error getting node details: {e}")
@@ -882,108 +989,246 @@ async def update_group(ctx: Context, group_id: str, name: str | None = None, des
 
 
 @mcp.tool()
-async def get_group_details(ctx: Context, group_id: str | None = None, include_nodes: bool = False) -> dict | str:
+async def get_group_details(
+    ctx: Context,
+    group_id: str | None = None,
+    include_nodes: bool = False,
+    fields: list[str] | None = None,
+    node_fields: list[str] | None = None
+) -> dict | str:
     """
     Get comprehensive group information using Python library API.
 
     Parameters:
     - group_id: ID of specific group to show (optional - if None, lists all groups)
     - include_nodes: Include detailed node information for groups
+    - fields: List of group/sub-group keys to include (if None, includes all fields)
+    - node_fields: List of node keys to include (if None, includes all node fields)
 
     When group_id is None: Lists all groups with hierarchy
     When group_id is provided: Shows detailed information for that specific group
     When include_nodes is True: Includes comprehensive node details within groups
 
-    Returns detailed group and node information.
+    ---
+    **IMPORTANT USAGE GUIDELINES:**
+
+    1. For home/room structure overview (recommended for most queries):
+       ```python
+       {
+           "include_nodes": true,
+           "fields": ["group_id", "group_name", "type", "total", "sub_groups", "node_details"],
+           "node_fields": ["node_id", "name", "type"]
+       }
+       ```
+
+    2. For home/room structure with basic device info:
+       ```python
+       {
+           "include_nodes": true,
+           "fields": ["group_id", "group_name", "type", "total", "sub_groups", "node_details"],
+           "node_fields": ["node_id", "name", "type", "model", "fw_version"]
+       }
+       ```
+
+    3. For detailed technical information:
+       ```python
+       {
+           "include_nodes": true,
+           "fields": ["group_id", "group_name", "type", "total", "sub_groups", "node_details",
+                     "is_matter", "fabric_id", "primary", "mutually_exclusive"],
+           "node_fields": ["node_id", "name", "type", "model", "fw_version", "status", "params"]
+       }
+       ```
+
+    **Common Use Cases:**
+    | Query Type          | Recommended Fields                                  |
+    |--------------------|---------------------------------------------------|
+    | "Show my home"     | Basic fields (option 1) to avoid large responses  |
+    | "List my devices"  | Basic fields (option 1) for clear device listing  |
+    | "Check my rooms"   | Basic fields (option 1) for room structure        |
+    | "Device details"   | Detailed fields (option 3) for full information   |
+
+    Note: When fields/node_fields are not provided, defaults to summary mode (basic fields)
+    to avoid overwhelming responses.
     """
+    log.info(f"Fetching group details. group_id={group_id}, include_nodes={include_nodes}")
 
     try:
         s = await ensure_login_session()
 
-        if group_id is None:
-            # List all groups with hierarchy using Python library API
-            log.info("Listing all groups with hierarchy")
+        # Default essential fields if none specified
+        if fields is None:
+            fields = [
+                "group_id", "group_name", "type", "total", "sub_groups",
+                "is_matter", "fabric_id", "primary", "mutually_exclusive",
+                "parent_group_id", "description"
+            ]
+        # Always ensure these fields are included for proper structure
+        if "sub_groups" not in fields:
+            fields.append("sub_groups")
+        if include_nodes and "node_details" not in fields:
+            fields.append("node_details")
 
+        # Default node fields if none specified
+        if node_fields is None:
+            node_fields = ["node_id", "name", "type"]
+
+        # Helper function to get device name and type from node
+        def get_device_info(node: dict) -> tuple[str, str]:
             try:
-                groups_list = await asyncio.to_thread(s.list_groups, sub_groups=True)
-                log.info("Successfully listed all groups")
+                devices = node.get("config", {}).get("devices", [])
+                params = node.get("params", {})
+                if devices and isinstance(devices, list):
+                    device = devices[0]
+                    device_name = device.get("name", "")  # e.g., "Light"
+                    device_type = device.get("type", "Unknown")  # Use device type as requested
 
-                # Standardize response format
-                group_data = {"groups": groups_list}
+                    # Get the user-given name from params
+                    user_visible_name = None
+                    if device_name and device_name in params:
+                        user_visible_name = params[device_name].get("Name")
+                    if not user_visible_name:
+                        user_visible_name = device_name or "Unnamed Device"
 
-                # If include_nodes is requested, get node details for each group
-                if include_nodes and groups_list:
-                    log.info("Fetching node details for all groups")
+                    return user_visible_name, device_type
+            except Exception as e:
+                log.warning(f"Error extracting device info: {e}")
+            return "Unknown Device", "Unknown"
 
-                    for group in groups_list:
-                        group_id_for_nodes = group.get("id") or group.get("group_id")
-                        if isinstance(group, dict) and group_id_for_nodes:
-                            try:
-                                # Get nodes for this group using Python library API
-                                nodes_data = await asyncio.to_thread(
-                                    s.list_nodes_in_group,
-                                    group_id_for_nodes,
-                                    node_details=True,
-                                    sub_groups=True
-                                )
-                                group["nodes"] = nodes_data
-                            except Exception as e:
-                                log.warning(f"Failed to get nodes for group {group_id_for_nodes}: {e}")
-                                group["nodes"] = f"Error getting nodes: {e}"
+        # Helper function to filter node details
+        def filter_node(node: dict) -> dict:
+            if not node_fields:
+                return node
 
-                return group_data
+            # Get proper device name and type first
+            display_name, device_type = get_device_info(node)
 
-            except HttpErrorResponse as e:
-                log.error(f"HTTP error listing groups: {e}")
-                return f"Error listing groups: API error - {e}"
+            # Create filtered dict with only requested fields
+            filtered = {}
 
+            # Add standard fields if requested
+            if "node_id" in node_fields:
+                filtered["node_id"] = node.get("node_id", "")
+            if "name" in node_fields:
+                filtered["name"] = display_name  # Use extracted name
+            if "type" in node_fields:
+                filtered["type"] = device_type   # Use extracted type
+            if "model" in node_fields:
+                filtered["model"] = node.get("model", "")
+            if "fw_version" in node_fields:
+                filtered["fw_version"] = node.get("fw_version", "")
+            if "status" in node_fields:
+                filtered["status"] = node.get("status", {})
+            if "params" in node_fields:
+                filtered["params"] = node.get("params", {})
+
+            return filtered
+
+        # Helper function to recursively filter groups
+        def filter_group_recursive(group: dict) -> dict:
+            if not group:
+                return group
+
+            # Filter top-level fields
+            filtered = {k: v for k, v in group.items() if k in fields}
+
+            # Handle node_details if present
+            if include_nodes and "node_details" in group:
+                if isinstance(group["node_details"], list):
+                    filtered["node_details"] = [
+                        filter_node(node) for node in group["node_details"]
+                    ]
+                elif isinstance(group["node_details"], dict):
+                    filtered["node_details"] = {
+                        k: filter_node(v) for k, v in group["node_details"].items()
+                    }
+                else:
+                    filtered["node_details"] = group["node_details"]
+
+            # Handle sub_groups recursively
+            if "sub_groups" in group and group["sub_groups"]:
+                filtered["sub_groups"] = [
+                    filter_group_recursive(sub_group)
+                    for sub_group in group["sub_groups"]
+                ]
+
+            return filtered
+
+        # Fetch the initial group data
+        if group_id:
+            groups = await asyncio.to_thread(s.list_groups, sub_groups=True)
+            # Find the specific group
+            target_group = None
+            for group in groups:
+                if group.get("group_id") == group_id:
+                    target_group = group
+                    break
+            if not target_group:
+                return f"Group not found with ID: {group_id}"
+            groups = [target_group]
         else:
-            # Show specific group details using Python library API
-            log.info(f"Getting details for specific group: {group_id}")
+            groups = await asyncio.to_thread(s.list_groups, sub_groups=True)
 
-            try:
-                group_data = await asyncio.to_thread(s.show_group, group_id, sub_groups=True)
-                log.info(f"Successfully retrieved details for group: {group_id}")
-
-                # If include_nodes is requested, get detailed node information
-                if include_nodes:
-                    log.info(f"Fetching detailed node information for group: {group_id}")
-
+        # If nodes are requested, fetch them for each group and sub-group
+        if include_nodes:
+            for group in groups:
+                # Fetch nodes for main group
+                group_id = group.get("group_id")
+                if group_id:
                     try:
-                        nodes_data = await asyncio.to_thread(
+                        nodes = await asyncio.to_thread(
                             s.list_nodes_in_group,
                             group_id,
                             node_details=True,
                             sub_groups=True
                         )
-
-                        # Add nodes data to the group response
-                        if isinstance(group_data, dict):
-                            group_data["nodes"] = nodes_data
-                        else:
-                            # If group_data isn't dict, create wrapper
-                            group_data = {
-                                "group_details": group_data,
-                                "nodes": nodes_data
-                            }
-
+                        # Add nodes to the group
+                        if isinstance(nodes, dict) and "groups" in nodes:
+                            for g in nodes["groups"]:
+                                if g["group_id"] == group_id and "node_details" in g:
+                                    group["node_details"] = g["node_details"]
+                                    break
                     except Exception as e:
-                        log.warning(f"Failed to get nodes for group {group_id}: {e}")
-                        if isinstance(group_data, dict):
-                            group_data["nodes"] = f"Error getting nodes: {e}"
+                        log.warning(f"Error fetching nodes for group {group_id}: {e}")
+                        group["node_details"] = []
 
-                return group_data
+                # Fetch nodes for sub-groups
+                if "sub_groups" in group:
+                    for sub_group in group["sub_groups"]:
+                        sub_group_id = sub_group.get("group_id")
+                        if sub_group_id:
+                            try:
+                                sub_nodes = await asyncio.to_thread(
+                                    s.list_nodes_in_group,
+                                    sub_group_id,
+                                    node_details=True,
+                                    sub_groups=True
+                                )
+                                # Add nodes to the sub-group
+                                if isinstance(sub_nodes, dict) and "groups" in sub_nodes:
+                                    for g in sub_nodes["groups"]:
+                                        if g["group_id"] == sub_group_id and "node_details" in g:
+                                            sub_group["node_details"] = g["node_details"]
+                                            break
+                            except Exception as e:
+                                log.warning(f"Error fetching nodes for sub-group {sub_group_id}: {e}")
+                                sub_group["node_details"] = []
 
-            except HttpErrorResponse as e:
-                log.error(f"HTTP error getting group details for {group_id}: {e}")
-                return f"Error getting group details for '{group_id}': API error - {e}"
+        # Apply filtering
+        if isinstance(groups, list):
+            filtered_groups = [filter_group_recursive(group) for group in groups]
+        else:
+            filtered_groups = filter_group_recursive(groups)
+
+        log.info("Successfully fetched and filtered group details")
+        return filtered_groups[0] if group_id and filtered_groups else filtered_groups
 
     except (ValueError, ConnectionError, RuntimeError) as e:  # From ensure_login_session
         return str(e)
-    except (NetworkError, SSLError, RequestTimeoutError) as e:
-        log.error(f"Network/SSL error getting group details: {e}")
-        return f"Error getting group details: Connection error - {e}"
+    except HttpErrorResponse as e:
+        log.error(f"HTTP error getting group details: {e}")
+        return f"Error getting group details: API error - {e}"
     except Exception as e:
-        log.exception("Unexpected error getting group details.")
+        log.exception("Unexpected error getting group details")
         return f"Error getting group details: An unexpected error occurred - {str(e)}"
 
