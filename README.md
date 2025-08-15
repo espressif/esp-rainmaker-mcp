@@ -1,4 +1,5 @@
 # ESP RainMaker MCP Server
+[![Trust Score](https://archestra.ai/mcp-catalog/api/badge/quality/espressif/esp-rainmaker-mcp)](https://archestra.ai/mcp-catalog/espressif__esp-rainmaker-mcp)
 
 This project provides a [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server wrapper around the [`esp-rainmaker-cli`](https://github.com/espressif/esp-rainmaker-cli) Python library.
 It allows MCP-compatible clients (like LLMs or applications such as Cursor, Claude Desktop, and Windsurf) to interact with your [ESP RainMaker](https://rainmaker.espressif.com/) devices using the official CLI.
