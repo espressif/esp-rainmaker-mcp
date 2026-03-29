@@ -22,6 +22,10 @@ By integrating MCP, the ESP RainMaker platform enhances its capabilities, allowi
 *   **ESP RainMaker CLI Login:** You *must* have successfully logged into ESP RainMaker using the standard `esp-rainmaker-cli login` command in your terminal at least once. This server relies on the credentials saved by that process.
 *   **RainMaker Nodes** added into your account since onboarding isn't supported by the MCP server.
 
+## Hosted deployment
+
+A hosted deployment is available on [Fronteir AI](https://fronteir.ai/mcp/espressif-esp-rainmaker-mcp).
+
 ## Installation & Setup
 
 1.  **Clone the Repository:**
